@@ -1,0 +1,13 @@
+# Per-project secrets (WiFi/MQTT credentials) - never commit these.
+# Each project has a secrets.h.example template that IS committed;
+# copy it to secrets.h and fill in real values locally.
+secrets.h
+
+# Arduino IDE / PlatformIO build artifacts
+build/
+.pio/
+*.hex
+*.bin
+
+# Editor cruft
+.vscode/
