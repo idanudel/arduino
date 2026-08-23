@@ -17,8 +17,18 @@ ssh -i ~/.ssh/claude_pi claude@192.168.0.83
 ```
 
 - Dedicated agent user `claude`, key auth, passwordless.
-- Groups: `claude`, `adm`, `systemd-journal` — can read logs via `journalctl`,
-  but is **NOT** in the `openhab` group.
+- Groups: `claude`, `adm`, `systemd-journal`, **`openhab`** (added 2026-08-23,
+  at Idan's request, via `sudo usermod -aG openhab claude`) — can read logs
+  via `journalctl`, and can now **read AND write** everything under
+  `/etc/openhab` directly (it's group-owned `openhab:openhab`,
+  group-writable). No staged-script dance needed for items/things/rules/
+  sitemaps anymore — just edit the files directly.
+  - Group membership only takes effect on a **fresh SSH connection** — an
+    already-open session won't pick it up.
+  - `chown` on these files still fails for `claude` (not root) — harmless,
+    files just end up owned `claude:openhab` or similar after a direct
+    write instead of `openhab:openhab`; that doesn't affect openHAB reading
+    them (still group/other readable).
 - `sudo -l` shows a narrow allowlist (verified 2026-08-23):
   ```
   (ALL) NOPASSWD: /usr/bin/systemctl restart expense-tracker
@@ -27,11 +37,13 @@ ssh -i ~/.ssh/claude_pi claude@192.168.0.83
   (ALL) NOPASSWD: /usr/sbin/nginx -t
   (ALL) NOPASSWD: /usr/bin/cp /home/claude/staging/openhab /etc/nginx/sites-enabled/openhab
   ```
-  Nothing here covers openHAB itself. Confirmed: **`claude` can read all of
-  `/etc/openhab` (group-readable) but cannot write to it** — `test -w` on
-  `items.items` / `default.things` returns false. There's no sudo rule for
-  writing openHAB config either.
-- Revoke agent access entirely: `sudo deluser --remove-home claude && sudo rm /etc/sudoers.d/claude` (run on the Pi, not by the agent).
+  **Nothing covers restarting `openhab.service` itself** — and that
+  restart is required after any sitemap change (see below). That still
+  needs Idan to run it.
+- Revoke `openhab` group access: `sudo gpasswd -d claude openhab` (keeps the
+  `claude` user itself). Revoke agent access entirely:
+  `sudo deluser --remove-home claude && sudo rm /etc/sudoers.d/claude` (run
+  on the Pi, not by the agent).
 
 ## The one thing that matters most: text config vs. UI-managed JSON
 
@@ -39,9 +51,19 @@ openHAB config comes from two completely different places that look similar
 but are NOT interchangeable:
 
 1. **Text config in `/etc/openhab/*`** — items, things, rules, sitemaps,
-   persistence, transform, scripts. These are plain files openHAB watches
-   and **hot-reloads automatically on save, no restart needed**. Safe to
-   hand-edit, diff, and version.
+   persistence, transform, scripts. Safe to hand-edit, diff, and version.
+   **Items, Things, and Rules hot-reload automatically on save** (confirmed
+   2026-08-23: saving a new `.rules` file produced an immediate
+   `Loading model '...'` log line and the new Thing/Items were live via the
+   REST API within ~1s, no restart).
+   **Sitemaps do NOT hot-reload on this box, despite being the same kind of
+   text file** — confirmed 2026-08-23 by editing an already-working,
+   long-existing sitemap line and finding the change absent from
+   `GET /rest/sitemaps/default/<page>` even after 15+ seconds and a `touch`.
+   Root cause unconfirmed (normal openHAB behavior says sitemaps should
+   hot-reload too — this box just doesn't do that in practice). **Any
+   sitemap edit needs `sudo systemctl restart openhab` to take effect** —
+   not in `claude`'s sudo allowlist, so this always needs Idan.
 2. **UI-managed state in `/var/lib/openhab/jsondb/*.json`** — anything
    created/edited through the openHAB UI (PaperUI/MainUI) instead of a text
    file. The MQTT broker and the main "8f618a1559" MQTT topic Thing that
@@ -131,30 +153,92 @@ a binary sensor than `motion.map`.
    String UtilityRoom_WaterLevel_Status "Utility Room Water Level Status [%s]" {channel="mqtt:topic:utility_room_water_level:status"}
    ```
 3. Add a line to `/etc/openhab/sitemaps/default.sitemap` in the relevant
-   group (see `Garage_motion`/`Kidsroom_motion` for the pattern) if it
-   should be visible in the UI.
-4. No restart needed — text config hot-reloads. Confirm with
-   `journalctl -u openhab -n 50 --no-pager` (claude can read this, in `adm`
-   group) that the new Thing came ONLINE and no parse errors appeared.
+   group (see `FloodBasementShower`/`FloodUpperShower`/
+   `BasementSumpPumpWaterLevel` in the "Sensors" frame for the pattern) if
+   it should be visible in the UI.
+   **Gotcha (hit and fixed 2026-08-23):** don't put a `[MAP(...):%s]`
+   transform pattern in the sitemap widget's own `label=`. If the Item
+   already declares that pattern (as in the Items step above), openHAB
+   silently drops the whole widget from the rendered sitemap — no log line,
+   no error, it just doesn't appear. Leave the sitemap label plain (e.g.
+   `label="Utility Room Water Level"`, no bracket suffix at all) and let
+   the Item's own `stateDescription` pattern handle formatting — that's
+   what the working `BasementSumpPumpWaterLevel` entry does.
+4. Items/Things/Rules take effect immediately (no restart). **The sitemap
+   change does not** — see the hot-reload caveat above. Ask Idan to run
+   `sudo systemctl restart openhab` (~30-60s downtime for the whole smart
+   home) before the sitemap entry will show up anywhere, including via the
+   REST API, not just the browser.
+5. Verify with the checks in the next section rather than assuming success.
 
-## Applying changes (claude can't write `/etc/openhab` directly)
+## Verifying a change actually took effect
 
-Proven workflow (from prior sessions):
+Don't rely on the browser — it's one more caching layer on top of an
+already-inconsistent-across-file-types reload story. Check the backend
+directly:
 
-1. Prepare the new file content locally, `scp` or heredoc it to
-   `/home/claude/staging/` on the Pi. Verify with `diff` against the live
-   file before proposing anything.
-2. Since there's no sudo rule for copying into `/etc/openhab/*`, this needs
-   Idan. Options, in order of preference:
-   - Give him one **short** command to run himself (his zsh terminal wraps
-     long pasted lines into broken multi-line input — this has corrupted a
-     config file before; never hand him a long one-liner).
-   - Stage a script and ask him to run `sudo bash <path>`.
-   - Ask him to add a specific line to `/etc/sudoers.d/claude` if this is
-     going to happen often (validate any sudoers edit with
-     `sudo visudo -c -f <file>` before installing).
-3. Always confirm success afterward by reading the file back and/or
-   checking `journalctl -u openhab` for load errors.
+```bash
+# Item existence + live state (works immediately for Items/Things):
+curl -s http://localhost:8080/rest/items/<ItemName> | python3 -m json.tool
+
+# Whether a sitemap widget is actually being served (only meaningful after
+# an openHAB restart) — get the page's widgetId from the root sitemap first:
+curl -s http://localhost:8080/rest/sitemaps/default/default | python3 -m json.tool | grep -B3 '"label": "<PageName>"'
+curl -s http://localhost:8080/rest/sitemaps/default/<widgetId> | grep -o '<ItemName>'
+
+# Rules/Things load status and parse errors - openHAB logs to FILES, not
+# journald/syslog (journalctl only shows service start/stop/reload, not
+# openHAB's own model-loading log lines):
+grep -i '<name>' /var/log/openhab/openhab.log      # app log incl. model loads, errors
+grep -i '<ItemName>' /var/log/openhab/events.log   # every item state change, timestamped
+
+# Watch live MQTT traffic on a topic (useful when an Item's state seems
+# stuck - confirms whether new messages are even arriving):
+mosquitto_sub -h localhost -p 1883 -u idanudel -P '<mqtt password from secrets.h>' -t '<topic>' -v
+```
+
+## Applying changes
+
+Now that `claude` is in the `openhab` group (see Access above), items,
+things, rules, and sitemap files can just be edited/appended to directly
+over the SSH session — no staging dance needed for those. Always back up
+the file first (`cp file file.bak.$(date +%Y%m%d-%H%M%S)`) since these are
+live, shared, hand-edited files with no version control on the Pi itself.
+
+**Restarting `openhab.service`** (only needed after a sitemap change) is
+the one thing still not writable/runnable by `claude` — that always needs
+Idan. Prior workflow for anything requiring his intervention still applies:
+give him one **short** command to run himself (his zsh terminal wraps long
+pasted lines into broken multi-line input — this has corrupted a config
+file before; never hand him a long one-liner), or stage a script and ask
+him to run `sudo bash <path>`.
+
+## Pushover alert rule pattern
+
+Used consistently across every existing `.rules` file — copy this exactly
+rather than inventing a different call style:
+
+```
+rule "<Descriptive rule name>"
+	when
+		Item <ItemName> changed from <A> to <B>
+	then
+		val actions = getActions("pushover", "pushover:pushover-account:daa1d3d0d7")
+		actions.sendMessage("<message text>","Openhab")
+end
+```
+
+- `val actions = getActions(...)` is declared **fresh inside each rule's
+  `then` block**, not once at file-top — that's the dominant convention
+  across `items.rules`/`kodeshDayRules.rules`/`system.rules` even though a
+  top-level file-global `val` also works fine (confirmed the same account
+  UID is reused as a global in `motion.rules` with no conflict — rule
+  files don't share a variable namespace, so naming collisions aren't a
+  real risk either way, but match the dominant per-rule-block style).
+- Title argument is always the literal string `"Openhab"` — not the
+  device/room name — by existing convention across every call site.
+- The Pushover account Thing UID (`pushover:pushover-account:daa1d3d0d7`)
+  is UI-managed and already configured — don't try to create a new one.
 
 ## Related
 

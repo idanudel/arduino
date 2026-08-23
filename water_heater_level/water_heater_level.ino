@@ -2,15 +2,13 @@
 // Reports whether water is present at the sensor's mounted height on the
 // steam water heater tank (e.g. a "low water" warning point).
 //
-// XKC-Y25V wiring (3 wires): brown = VCC (5-12V), blue = GND, black = OUT.
-// OUT is an NPN open-collector output: it only ever pulls to GND when
-// triggered, it never sources 5V. That makes it safe to read directly with
-// an ESP8266 3.3V GPIO in INPUT_PULLUP mode (the ESP's internal pull-up
-// supplies the "high" side, the sensor just sinks it to ground) - no
-// external level shifter needed. VCC must come from a separate 5V supply;
-// tie its GND to the ESP8266's GND.
-// Verify with a multimeter against your specific sensor's datasheet before
-// wiring it up - some variants/output modes differ.
+// XKC-Y25V wiring (3 wires): brown = VCC (5-12V), blue = GND, black/white = OUT.
+// VCC must come from a separate 5V supply; tie its GND to the ESP8266's GND.
+// OUT is read directly by an ESP8266 3.3V GPIO in INPUT_PULLUP mode.
+// Confirmed by testing (2026-08-23) on this unit: OUT reads HIGH when water
+// is present (sensor's red LED on) and LOW when not - i.e. active-high, not
+// the active-low open-collector behavior some XKC-Y25V datasheets describe.
+// If you swap sensors/variants, re-verify polarity rather than assuming.
 
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
@@ -98,9 +96,10 @@ void loop() {
 }
 
 void updateLevel() {
-  // OUT is pulled to GND (LOW) when the sensor detects water, thanks to
-  // INPUT_PULLUP it reads HIGH when no water is present.
-  int reading = (digitalRead(levelPin) == LOW) ? 1 : 0;
+  // HIGH = water present (sensor's red LED on), LOW = no water. See wiring
+  // note at the top of this file - this polarity was confirmed by testing,
+  // not assumed from the datasheet.
+  int reading = (digitalRead(levelPin) == HIGH) ? 1 : 0;
 
   if (reading == candidateState) {
     candidateCount++;
