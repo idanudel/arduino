@@ -45,6 +45,21 @@ const char* mqtt_topic_level = "openhab/devices/" ROOM "/" DEVICE;
 When copying a sketch as a template for a new project, those two lines are
 the only thing that need to change to get a correct client name and topic.
 
+## Wiring a device into openHAB
+
+Once a sketch is publishing to its MQTT topic, it still needs an openHAB
+Thing/Item to be usable there. See `.claude/commands/openhab-changes.md` for
+how to safely read and change openHAB config on the home server (SSH access,
+which config is hand-editable text vs. UI-managed JSON, the exact
+Thing/Item pattern to copy for a new binary sensor, and how changes actually
+get applied since the agent can't write `/etc/openhab` directly).
+
+## Skills (`.claude/commands/`)
+
+| Skill | Purpose |
+|---|---|
+| `openhab-changes` | How to read/change openHAB config (items, things, rules, sitemaps) on the home server for a new or existing device |
+
 ## Projects
 
 - `water_heater_level/` - XKC-Y25V non-contact liquid level sensor on the
