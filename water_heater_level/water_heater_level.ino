@@ -24,10 +24,19 @@
 
 const char* mqtt_client_name = ROOM "_" DEVICE;
 const char* mqtt_topic_level = "openhab/devices/" ROOM "/" DEVICE;
+// Retained "online"/"offline" (via MQTT last will) so openhab knows if this
+// device itself has died, not just what it last reported.
+const char* mqtt_topic_status = "openhab/devices/" ROOM "/" DEVICE "/status";
 
 const int levelPin = 14; // D5 on NodeMCU/Wemos D1 mini
 
-int lastPublishedState = -1; // force a publish on first read
+// Debounce: only trust a state once this many consecutive loop iterations
+// (2s apart) agree, so a single noisy read near the sensor's threshold
+// can't trigger a false publish.
+const int DEBOUNCE_COUNT = 3;
+int candidateState = -1;
+int candidateCount = 0;
+int lastPublishedState = -1; // force a publish on first stable read
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -61,8 +70,12 @@ void setup_wifi() {
 void reconnect() {
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
-    if (client.connect(mqtt_client_name, MQTT_USER, MQTT_PASSWORD)) {
+    // Last will: if this device disconnects uncleanly (crash/power loss/
+    // WiFi drop), the broker publishes "offline" to mqtt_topic_status for us.
+    if (client.connect(mqtt_client_name, MQTT_USER, MQTT_PASSWORD,
+                        mqtt_topic_status, 1, true, "offline")) {
       Serial.println("connected");
+      client.publish(mqtt_topic_status, "online", true);
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -73,6 +86,9 @@ void reconnect() {
 }
 
 void loop() {
+  if (WiFi.status() != WL_CONNECTED) {
+    setup_wifi();
+  }
   if (!client.connected()) {
     reconnect();
   }
@@ -84,12 +100,19 @@ void loop() {
 void updateLevel() {
   // OUT is pulled to GND (LOW) when the sensor detects water, thanks to
   // INPUT_PULLUP it reads HIGH when no water is present.
-  int waterPresent = (digitalRead(levelPin) == LOW) ? 1 : 0;
+  int reading = (digitalRead(levelPin) == LOW) ? 1 : 0;
 
-  if (waterPresent != lastPublishedState) {
-    lastPublishedState = waterPresent;
+  if (reading == candidateState) {
+    candidateCount++;
+  } else {
+    candidateState = reading;
+    candidateCount = 1;
+  }
+
+  if (candidateCount >= DEBOUNCE_COUNT && candidateState != lastPublishedState) {
+    lastPublishedState = candidateState;
     Serial.print("water level state: ");
-    Serial.println(waterPresent);
-    client.publish(mqtt_topic_level, waterPresent ? "1" : "0");
+    Serial.println(lastPublishedState);
+    client.publish(mqtt_topic_level, lastPublishedState ? "1" : "0", true);
   }
 }
