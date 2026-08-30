@@ -6,9 +6,13 @@ description: "How to safely read and change openHAB config (items, things, rules
 # openHAB changes — Idan's home server
 
 Idan's smart home runs on an Orange Pi (openHABian), hostname `openhabian`,
-LAN `192.168.0.83`. It also runs his expense-tracker app. **Be careful —
-breaking openHAB or nginx here affects the actual house**, not a test
-environment.
+LAN `192.168.0.83`, running **openHAB 4.0.0** (`dpkg -l | grep openhab`).
+The Pi also runs his expense-tracker app and other unrelated personal
+projects — see `~/.claude/PI-INFRA.md` (global, cross-project) for shared
+infra facts (network/port topology, nginx, GitHub runners, Pushover key
+reuse) that apply to any project on this box, not just openHAB. **Be
+careful — breaking openHAB or nginx here affects the actual house**, not a
+test environment.
 
 ## Access
 
@@ -59,11 +63,19 @@ but are NOT interchangeable:
    **Sitemaps do NOT hot-reload on this box, despite being the same kind of
    text file** — confirmed 2026-08-23 by editing an already-working,
    long-existing sitemap line and finding the change absent from
-   `GET /rest/sitemaps/default/<page>` even after 15+ seconds and a `touch`.
-   Root cause unconfirmed (normal openHAB behavior says sitemaps should
-   hot-reload too — this box just doesn't do that in practice). **Any
-   sitemap edit needs `sudo systemctl restart openhab` to take effect** —
-   not in `claude`'s sudo allowlist, so this always needs Idan.
+   `GET /rest/sitemaps/default/<page>` even after 15+ seconds and a `touch`;
+   reconfirmed 2026-08-24 the same way with a different edit. **Not an
+   openHAB-version limitation** — this box runs a modern **openHAB 4.0.0**
+   (`dpkg -l | grep openhab`), and sitemap hot-reload has been supported
+   for years by that point; the old "sitemaps need a restart" limitation
+   only ever applied to much older 1.x/early-2.x releases. Root cause is
+   still genuinely unconfirmed beyond that — pinning it down further would
+   need DEBUG logging on the model/UI bundles via the Karaf console
+   (`openhab-cli console`, port 8101), which the `claude` user doesn't have
+   credentials for. **Any sitemap edit needs `sudo systemctl restart
+   openhab` to take effect** (not in `claude`'s sudo allowlist, so this
+   always needs Idan) — treat this as a reliable, permanent workaround
+   rather than something worth re-investigating each time.
 2. **UI-managed state in `/var/lib/openhab/jsondb/*.json`** — anything
    created/edited through the openHAB UI (PaperUI/MainUI) instead of a text
    file. The MQTT broker and the main "8f618a1559" MQTT topic Thing that
@@ -152,10 +164,21 @@ a binary sensor than `motion.map`.
    Number UtilityRoom_WaterLevel "Utility Room Water Level [MAP(triggered.map):%s]" {channel="mqtt:topic:utility_room_water_level:water_level"}
    String UtilityRoom_WaterLevel_Status "Utility Room Water Level Status [%s]" {channel="mqtt:topic:utility_room_water_level:status"}
    ```
-3. Add a line to `/etc/openhab/sitemaps/default.sitemap` in the relevant
-   group (see `FloodBasementShower`/`FloodUpperShower`/
-   `BasementSumpPumpWaterLevel` in the "Sensors" frame for the pattern) if
-   it should be visible in the UI.
+3. Add **two** lines to `/etc/openhab/sitemaps/default.sitemap` in the
+   relevant group (see `FloodBasementShower`/`FloodUpperShower`/
+   `BasementSumpPumpWaterLevel` in the "Sensors" frame for the pattern) —
+   the sensor value AND its `_Status` companion. It's easy to add only the
+   first and forget the status indicator (happened building
+   `utility_room_water_level` — had to come back and add it after the
+   fact), but the whole point of wiring up the LWT status topic in
+   firmware is defeated if nothing in the UI surfaces it:
+   ```
+   Text item=UtilityRoom_WaterLevel icon="water" label="Utility Room Water Level"
+   Text item=UtilityRoom_WaterLevel_Status icon="network" label="Utility Room Water Level Sensor Status"
+   ```
+   `icon="network"` is the convention for a connectivity/status indicator
+   (no existing precedent for this before `utility_room_water_level` — this
+   is now the reference for the next one).
    **Gotcha (hit and fixed 2026-08-23):** don't put a `[MAP(...):%s]`
    transform pattern in the sitemap widget's own `label=`. If the Item
    already declares that pattern (as in the Items step above), openHAB
@@ -163,7 +186,9 @@ a binary sensor than `motion.map`.
    no error, it just doesn't appear. Leave the sitemap label plain (e.g.
    `label="Utility Room Water Level"`, no bracket suffix at all) and let
    the Item's own `stateDescription` pattern handle formatting — that's
-   what the working `BasementSumpPumpWaterLevel` entry does.
+   what the working `BasementSumpPumpWaterLevel` entry does. (The `_Status`
+   item has no transform pattern to worry about — it's a plain String
+   showing raw `online`/`offline`.)
 4. Items/Things/Rules take effect immediately (no restart). **The sitemap
    change does not** — see the hot-reload caveat above. Ask Idan to run
    `sudo systemctl restart openhab` (~30-60s downtime for the whole smart
