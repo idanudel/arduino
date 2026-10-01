@@ -1,0 +1,98 @@
+// Reference copy of what's deployed on the openHAB Pi for this device (2026-09-30).
+// The live files on the Pi are the source of truth; keep this in sync when changing them.
+// Each section below was appended/inserted into the named file.
+
+// ===== /etc/openhab/things/default.things (appended) =====
+
+// Utility room water heater (boiler) refill valve controller - arduino repo water_heater_fill/.
+// "request" is command-only, NOT retained: one-shot FILL/STOP/RESET. The ESP8266 times and closes the valve itself.
+Thing mqtt:topic:utility_room_water_fill "Utility Room Water Fill Valve mqtt" (mqtt:broker:dd06a9365e) {
+	Channels:
+		Type string : request "request" [ commandTopic="openhab/devices/utility_room/water_fill/request", retained=false, qos=1 ]
+		Type string : state "state" [ stateTopic="openhab/devices/utility_room/water_fill/state" ]
+		Type string : available "available" [ stateTopic="openhab/devices/utility_room/water_fill/available" ]
+		Type string : last_result "last_result" [ stateTopic="openhab/devices/utility_room/water_fill/last_result" ]
+		Type number : last_duration "last_duration" [ stateTopic="openhab/devices/utility_room/water_fill/last_duration" ]
+		Type datetime : last_fill_time "last_fill_time" [ stateTopic="openhab/devices/utility_room/water_fill/last_fill_time" ]
+		Type string : event "event" [ stateTopic="openhab/devices/utility_room/water_fill/event" ]
+		Type string : status "status" [ stateTopic="openhab/devices/utility_room/water_fill/status" ]
+}
+
+// ===== /etc/openhab/items/items.items (appended) =====
+// Utility room water heater refill valve (arduino repo water_heater_fill/), added 2026-09-30.
+// _Request is a momentary command item: autoupdate=false so it never holds a state, not persisted, never restored.
+String UtilityRoom_WaterFill_Request "Fill Boiler Water" {channel="mqtt:topic:utility_room_water_fill:request", autoupdate="false"}
+String UtilityRoom_WaterFill_State "Boiler Fill State [%s]" {channel="mqtt:topic:utility_room_water_fill:state"}
+String UtilityRoom_WaterFill_Available "Boiler Fill Available [%s]" {channel="mqtt:topic:utility_room_water_fill:available"}
+String UtilityRoom_WaterFill_LastResult "Boiler Last Fill Result [%s]" {channel="mqtt:topic:utility_room_water_fill:last_result"}
+Number UtilityRoom_WaterFill_LastDuration "Boiler Last Fill Duration [%.1f s]" {channel="mqtt:topic:utility_room_water_fill:last_duration"}
+DateTime UtilityRoom_WaterFill_LastFillTime "Boiler Last Fill Time [%1$td-%1$tm-%1$tY %1$tH:%1$tM:%1$tS]" {channel="mqtt:topic:utility_room_water_fill:last_fill_time"}
+String UtilityRoom_WaterFill_Event "Boiler Fill Last Event [%s]" {channel="mqtt:topic:utility_room_water_fill:event"}
+String UtilityRoom_WaterFill_Status "Boiler Fill Valve Controller Status [%s]" {channel="mqtt:topic:utility_room_water_fill:status"}
+
+// ===== /etc/openhab/sitemaps/default.sitemap (new frame after "Switches") =====
+    Frame label="Boiler Water" {
+        Text item=UtilityRoom_WaterLevel icon="water" label="Boiler Water Level Sensor" valuecolor=[0="red", 1="green"]
+        Switch item=UtilityRoom_WaterFill_Request icon="water" label="Fill Boiler Water" mappings=[FILL="Fill", STOP="Stop"] visibility=[UtilityRoom_WaterFill_Status=="online"]
+        Text item=UtilityRoom_WaterFill_State icon="water" label="Fill State" valuecolor=[IDLE="green", FILLING="blue", COOLDOWN="orange", ERROR="red"]
+        Text item=UtilityRoom_WaterFill_Available icon="water" label="Fill Available" valuecolor=[YES="green", NO="orange"]
+        Text item=UtilityRoom_WaterFill_LastFillTime icon="time" label="Last Fill Time"
+        Text item=UtilityRoom_WaterFill_LastResult icon="water" label="Last Fill Result"
+        Text item=UtilityRoom_WaterFill_LastDuration icon="time" label="Last Fill Duration"
+        Text item=UtilityRoom_WaterFill_Event icon="text" label="Last Event"
+        Switch item=UtilityRoom_WaterFill_Request icon="error" label="Clear Fill Error" mappings=[RESET="Reset"] visibility=[UtilityRoom_WaterFill_State=="ERROR"]
+        Text item=UtilityRoom_WaterFill_Status icon="network" label="Fill Valve Controller Status" valuecolor=[online="green", offline="red"]
+        Text item=UtilityRoom_WaterLevel_Status icon="network" label="Water Level Sensor Status" valuecolor=[online="green", offline="red"]
+    }
+
+// ===== /etc/openhab/rules/items.rules (after the UtilityRoom_WaterLevel rules) =====
+
+// Utility room water heater refill valve (water_heater_fill). ERROR means the ESP8266 either had to
+// use its failsafe timer to close the valve, or reset while the valve was open - worth knowing about.
+rule "UtilityRoom_WaterFill_State changed to ERROR"
+	when
+		Item UtilityRoom_WaterFill_State changed to "ERROR"
+	then
+		val actions = getActions("pushover", "pushover:pushover-account:daa1d3d0d7")
+		actions.sendMessage("Boiler fill valve controller in ERROR: " + UtilityRoom_WaterFill_Event.state + " - check the valve is closed","Openhab",null,null,null,null,null,null,"oneplus13")
+end
+
+// ===== /etc/openhab/rules/alerts.rules (globals near top) =====
+
+var Timer utilityRoomWaterFillOfflineTimer = null
+var boolean utilityRoomWaterFillOfflineAlerted = false
+
+// ===== /etc/openhab/rules/alerts.rules (appended) =====
+
+rule "UtilityRoom_WaterFill_Status changed to offline"
+	when
+		Item UtilityRoom_WaterFill_Status changed to "offline"
+	then
+		if (utilityRoomWaterFillOfflineTimer !== null) {
+			utilityRoomWaterFillOfflineTimer.cancel
+			utilityRoomWaterFillOfflineTimer = null
+		}
+		utilityRoomWaterFillOfflineTimer = createTimer(now.plusHours(36)) [|
+			utilityRoomWaterFillOfflineTimer = null
+			if (UtilityRoom_WaterFill_Status.state == "offline") {
+				utilityRoomWaterFillOfflineAlerted = true
+				val actions = getActions("pushover", "pushover:pushover-account:daa1d3d0d7")
+				actions.sendMessage("Boiler fill valve controller went offline","Openhab",null,null,null,null,null,null,"oneplus13")
+			}
+		]
+end
+
+rule "UtilityRoom_WaterFill_Status changed to online"
+	when
+		Item UtilityRoom_WaterFill_Status changed to "online"
+	then
+		if (utilityRoomWaterFillOfflineTimer !== null) {
+			utilityRoomWaterFillOfflineTimer.cancel
+			utilityRoomWaterFillOfflineTimer = null
+		}
+		if (utilityRoomWaterFillOfflineAlerted) {
+			utilityRoomWaterFillOfflineAlerted = false
+			val actions = getActions("pushover", "pushover:pushover-account:daa1d3d0d7")
+			actions.sendMessage("Boiler fill valve controller back online","Openhab",null,null,null,null,null,null,"oneplus13")
+		}
+end

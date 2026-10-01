@@ -76,6 +76,19 @@ but are NOT interchangeable:
    openhab` to take effect** (not in `claude`'s sudo allowlist, so this
    always needs Idan) — treat this as a reliable, permanent workaround
    rather than something worth re-investigating each time.
+   **UPDATE 2026-09-30 — likely root cause found, restart NOT needed:**
+   openHAB's file watcher misses **rename-based** writes (`sed -i`, most
+   editors' save-to-temp-then-rename) — the file content changes but no
+   `Loading model` line appears, for `.rules` files too, not just sitemaps
+   (confirmed: `sed -i` on `items.rules`/`alerts.rules` produced no reload).
+   An **in-place** write (same inode) reloads immediately, sitemap
+   included: `cp default.sitemap /home/claude/staging/sm.tmp && cat
+   /home/claude/staging/sm.tmp > default.sitemap` → `Loading model
+   'default.sitemap'` within seconds and the new frame was served by
+   `/rest/sitemaps/default/default`, no restart. `>>` appends are in-place
+   too, which is why appending to things/items always "just worked". So:
+   make edits however you like, then finish with the `cat tmp > file`
+   rewrite, and confirm the `Loading model '<file>'` log line appeared.
 2. **UI-managed state in `/var/lib/openhab/jsondb/*.json`** — anything
    created/edited through the openHAB UI (PaperUI/MainUI) instead of a text
    file. The MQTT broker and the main "8f618a1559" MQTT topic Thing that
@@ -229,6 +242,9 @@ things, rules, and sitemap files can just be edited/appended to directly
 over the SSH session — no staging dance needed for those. Always back up
 the file first (`cp file file.bak.$(date +%Y%m%d-%H%M%S)`) since these are
 live, shared, hand-edited files with no version control on the Pi itself.
+After a `sed -i`/rename-style edit, rewrite the file in place (`cat
+tmp > file`) so the watcher actually notices — see the 2026-09-30 update
+in the text-config section above.
 
 **Restarting `openhab.service`** (only needed after a sitemap change) is
 the one thing still not writable/runnable by `claude` — that always needs

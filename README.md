@@ -65,3 +65,6 @@ get applied since the agent can't write `/etc/openhab` directly).
 - `water_heater_level/` - XKC-Y25V non-contact liquid level sensor on the
   steam water heater tank (utility room), reports low-water state to openhab
   via MQTT.
+- `water_heater_fill/` - relay + 12V solenoid valve on the same tank's
+  water feed; openHAB sends a one-shot "fill" request, the ESP8266 times
+  and closes the valve itself (10s fill, 30s cooldown).
